@@ -1,3 +1,6 @@
+# project files
+cbb_data_raw/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
