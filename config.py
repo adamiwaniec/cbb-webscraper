@@ -17,7 +17,7 @@ GAME_STATS_FILE = 'game_stats.csv'
 
 PLAYER_MAP_FILE = 'players.csv'
 TEAM_MAP_FILE = 'mens_team_map.csv'
-NON_DIVISION_TEAM_MAP_FILE = 'non_division_team_map.csv'
+NON_DIVISION_TEAM_MAP_FILE = 'mens_team_map_non_d1.csv'
 
 PLAYER_MAP_PATH = CBB_MAPS_PATH / PLAYER_MAP_FILE
 TEAM_MAP_PATH = CBB_MAPS_PATH / TEAM_MAP_FILE
