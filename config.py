@@ -1,16 +1,15 @@
 from pathlib import Path
-import sys
 
 
 ### DEFINE PATHS + FILENAMES
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_PATH = PROJECT_ROOT.parent / 'data'
 
-sys.path.insert(0, str(PROJECT_ROOT / 'CBBpy' / 'src'))
+CBB_MAPS_PATH = DATA_PATH / 'maps'
+SCRAPING_DATA_PATH = DATA_PATH / 'cbb_data_raw'
 
-CBB_MAPS_PATH = PROJECT_ROOT / 'cbb_maps'
-SCRAPING_DATA_PATH = PROJECT_ROOT / 'cbb_data_raw'
-
+PBP_FILE = 'pbp_data.csv'
 BOXSCORE_FILE = 'boxscore_data.csv'
 GAME_DATA_FILE = 'game_data.csv'
 GAME_INFO_FILE = 'game_info.csv'

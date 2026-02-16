@@ -52,11 +52,10 @@ _shutdown_requested = False
 def _handle_shutdown(signum, frame):
     """Handle Ctrl+C gracefully"""
     global _shutdown_requested
-    print("\n\nShutdown requested. Flushing data and exiting gracefully...")
+    print("\n\nShutdown requested. Flushing data, consolidating error log and exiting...")
     _shutdown_requested = True
     # Consolidate error log immediately before exit
     consolidate_error_log()
-    print("Error log consolidated and saved. Exiting.")
     exit(0)
 
 signal.signal(signal.SIGINT, _handle_shutdown)
@@ -353,6 +352,9 @@ def get_all_game_ids_for_season(year: int) -> List[str]:
     """Get all game IDs for a given season."""
 
     print(f"    Fetching all game IDs for {year} season...")
+    
+    if _shutdown_requested:
+        return []
 
     game_id_list = []
 
@@ -368,6 +370,9 @@ def get_all_game_ids_for_season(year: int) -> List[str]:
                 game_id_list = []
 
     if not game_id_list:
+        if _shutdown_requested:
+            return []
+        
         # fetch game ids using API
         all_game_ids = s.get_game_ids_season(year)
 
@@ -454,6 +459,9 @@ def scrape_season_data(year: int, existing_ids: Set[str]) -> int:
     
     game_ids = get_all_game_ids_for_season(year)
     
+    if _shutdown_requested:
+        return 0
+    
     # filter out already scraped games
     new_game_ids = [gid for gid in game_ids if gid not in existing_ids]
     
@@ -470,6 +478,11 @@ def scrape_season_data(year: int, existing_ids: Set[str]) -> int:
     error_ids_count = 0
     
     for idx, game_id in enumerate(new_game_ids, 1):
+
+        #check if shutdown was initiated first
+        if _shutdown_requested:
+            return 0
+        
         data = None
         has_error = False
         
@@ -588,6 +601,10 @@ def run_scraper():
     total_games_scraped = 0
     
     for season_idx, year in enumerate(range(START_YEAR, END_YEAR + 1), 1):
+        #check if shutdown was initiated first
+        if _shutdown_requested:
+            return
+        
         print(f"\n[Season {season_idx}/{total_seasons}]")
         
         try:
@@ -596,6 +613,8 @@ def run_scraper():
             total_games_scraped += games_scraped
         except Exception as e:
             print(f"    Error processing season {year}: {e}")
+            if _shutdown_requested:
+                return
             continue
         
         if year < END_YEAR:
