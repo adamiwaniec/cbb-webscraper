@@ -11,7 +11,6 @@ SCRAPING_DATA_PATH = DATA_PATH / 'cbb_data_raw'
 
 PBP_FILE = 'pbp_data.csv'
 BOXSCORE_FILE = 'boxscore_data.csv'
-GAME_DATA_FILE = 'game_data.csv'
 GAME_INFO_FILE = 'game_info.csv'
 GAME_STATS_FILE = 'game_stats.csv'
 
