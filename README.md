@@ -47,6 +47,18 @@ python scrape_main.py
 
 Data is saved to `../data/cbb_data_raw/`
 
+## Mapping team names to numeric IDs
+
+To scrape and build a map of college basketball teams, use the utility script:
+
+```bash
+python scrape_new_teams.py
+```
+
+This will scan a range of team IDs on ESPN using cbbpy and add any non-D1 teams to the output map file. Configure the ID range and file paths in the cbbpy API function call as needed.
+
+A D1 team map is provided inside the CBBpy package, which this script will copy into the same data/maps/ directory as the other map.
+
 ## Output Data Modes
 
 - **GAME_INFO**: Game information (scores, teams, dates, rankings)
