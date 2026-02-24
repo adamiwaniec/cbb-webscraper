@@ -27,10 +27,10 @@ import signal
 # ========= CONFIGURATION MACROS =========
 
 # Data collection mode: 'GAME_INFO', 'GAME_STATS', 'BOXSCORES', or 'PBP'
-SCRAPE_MODE = 'GAME_STATS'
+SCRAPE_MODE = 'GAME_INFO'
 
 # Season configuration (ESPN data only availabe from 2003)
-START_YEAR = 2021
+START_YEAR = 2025
 END_YEAR = 2026
 
 # API call delay (seconds) - adjust to avoid rate limiting
