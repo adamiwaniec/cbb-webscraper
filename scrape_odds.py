@@ -42,8 +42,8 @@ driver = None
 LOGGING_ENABLED = True
 
 # Seasons to scrape (format: "YYYY-YYYY")
-MIN_SEASON = "2002-2003"  # Start season
-MAX_SEASON = "2025-2026"  # End season (optional, mostly for reference)
+MIN_SEASON = "2024-2025"  # Start season
+MAX_SEASON = "2024-2025"  # End season (optional, mostly for reference)
 
 # Delay between requests (in seconds)
 # Format: (min_delay, max_delay) - random delay between these values
@@ -277,9 +277,9 @@ def _is_button_disabled(button) -> bool:
     except:
         return False
 
-
+# return entire data frame and number of new rows scraped as two variables
 def scrape_all_pages(base_url: str, output_file: str = None, 
-                     max_pages: Optional[int] = None) -> pd.DataFrame:
+                     max_pages: Optional[int] = None):
     """Scrape all pages by clicking pagination."""
     global driver
     
@@ -304,6 +304,7 @@ def scrape_all_pages(base_url: str, output_file: str = None,
     page_count = 0
     combined_df = pd.DataFrame()
     seen_rows = set()  # Track unique rows by tuple
+    new_rows_total = 0
     
     # Load existing data if file exists to prevent duplicates
     if os.path.exists(output_file):
@@ -367,6 +368,8 @@ def scrape_all_pages(base_url: str, output_file: str = None,
                 else:
                     logger.info(f"All {len(df)} rows were duplicates")
                 
+                new_rows_total += len(new_rows)
+                
                 # Print progress every page
                 print(f"  Page {page_count}: {len(combined_df):,} rows total", end="\r")
             else:
@@ -422,7 +425,114 @@ def scrape_all_pages(base_url: str, output_file: str = None,
         driver.quit()
         logger.info("Browser closed")
     
-    return combined_df
+    return combined_df, new_rows_total
+
+
+# =============================================================================
+# ODDSHARVESTER UPCOMING ODDS SCRAPING
+# =============================================================================
+
+def scrape_upcoming_odds(days_ahead: int = 0) -> pd.DataFrame:
+    """
+    Scrape upcoming NCAA basketball odds from OddsPortal via OddsHarvester.
+
+    Parameters:
+        days_ahead: Number of days ahead to scrape (0 = today only,
+                    1 = today + tomorrow, etc.)
+
+    Returns:
+        DataFrame with columns: match_date, home_team, away_team,
+        home_ml, away_ml, bookmaker_name, league_name
+        Also saves to data/sportsbook_lines_raw/upcoming_odds.csv
+    """
+    import asyncio
+    import json as json_module
+    from datetime import datetime as dt, timedelta
+
+    try:
+        from oddsharvester.core.scraper_app import run_scraper
+        from oddsharvester.utils.command_enum import CommandEnum
+    except ImportError:
+        print("  [ERR] OddsHarvester not installed. Cannot scrape upcoming odds.")
+        return pd.DataFrame()
+
+    today = dt.now()
+    all_rows = []
+
+    for day_offset in range(days_ahead + 1):
+        target_date = today + timedelta(days=day_offset)
+        date_str = target_date.strftime('%Y%m%d')
+        print(f"  Scraping odds for {target_date.strftime('%Y-%m-%d')}...")
+
+        try:
+            result = asyncio.run(run_scraper(
+                command=CommandEnum.UPCOMING_MATCHES,
+                sport="basketball",
+                date=date_str,
+                markets=["home_away"],
+                headless=True,
+                request_delay=1.0,
+            ))
+        except Exception as e:
+            print(f"    Error scraping odds for {date_str}: {e}")
+            continue
+
+        if result is None or not result.success:
+            print(f"    No odds found for {date_str}")
+            continue
+
+        print(f"    Found {len(result.success)} matches")
+
+        for match in result.success:
+            home_team = match.get('home_team', '')
+            away_team = match.get('away_team', '')
+            match_date = match.get('match_date', '')
+            league_name = match.get('league_name', '')
+
+            # Parse home_away_market
+            ha_market = match.get('home_away_market', [])
+            if isinstance(ha_market, str):
+                try:
+                    ha_market = json_module.loads(ha_market)
+                except (json_module.JSONDecodeError, TypeError):
+                    ha_market = []
+
+            if not ha_market:
+                continue
+
+            for bookie in ha_market:
+                try:
+                    home_ml = float(bookie.get('1', 0))
+                    away_ml = float(bookie.get('2', 0))
+                except (ValueError, TypeError):
+                    continue
+
+                if home_ml == 0 or away_ml == 0:
+                    continue
+
+                all_rows.append({
+                    'match_date': match_date,
+                    'home_team': home_team,
+                    'away_team': away_team,
+                    'home_ml': home_ml,
+                    'away_ml': away_ml,
+                    'bookmaker_name': bookie.get('bookmaker_name', ''),
+                    'league_name': league_name,
+                })
+
+    if not all_rows:
+        print("  No upcoming odds found")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_rows)
+
+    # Save to file
+    output_path = SPORTSBOOK_LINES_RAW_PATH / 'upcoming_odds.csv'
+    os.makedirs(str(SPORTSBOOK_LINES_RAW_PATH), exist_ok=True)
+    df.to_csv(str(output_path), index=False)
+    print(f"  Saved {len(df)} odds rows to {output_path}")
+
+    return df
 
 
 if __name__ == "__main__":
@@ -447,11 +557,11 @@ if __name__ == "__main__":
     logger.info(f"HEADLESS_MODE: {HEADLESS_MODE}")
     logger.info(f"Output file: {OUTPUT_CSV_FILE}")
     
-    df = scrape_all_pages(url)
+    df, new_rows = scrape_all_pages(url)
     
     print("=" * 60)
     if not df.empty:
-        print(f"SUCCESS: Scraped {len(df)} rows")
+        print(f"SUCCESS: Scraped {len(df)} rows ({new_rows} new rows)")
         print(f"Columns: {len(df.columns)}")
         if 'Date' in df.columns:
             print(f"Date range: {df['Date'].min()} to {df['Date'].max()}")

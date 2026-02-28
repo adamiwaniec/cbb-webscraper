@@ -27,14 +27,14 @@ import signal
 # ========= CONFIGURATION MACROS =========
 
 # Data collection mode: 'GAME_INFO', 'GAME_STATS', 'BOXSCORES', or 'PBP'
-SCRAPE_MODE = 'GAME_INFO'
+SCRAPE_MODE = 'BOXSCORES'
 
 # Season configuration (ESPN data only availabe from 2003)
-START_YEAR = 2025
+START_YEAR = 2026
 END_YEAR = 2026
 
 # API call delay (seconds) - adjust to avoid rate limiting
-API_DELAY = 0.1
+API_DELAY = 0.4
 
 # Request attempts - number of retries for failed requests
 cbbpy_utils.ATTEMPTS = 2
@@ -43,7 +43,7 @@ cbbpy_utils.ATTEMPTS = 2
 USE_EXISTING_GAME_IDS = True
 
 # Skip error game IDs already logged in error_game_ids.csv
-SKIP_EXISTING_ERROR_GAME_IDS = True
+SKIP_EXISTING_ERROR_GAME_IDS = False
 
 
 # ========= EARLY STOPPAGE HANDLING =========
@@ -641,6 +641,80 @@ def run_scraper():
             print(f"  Could not read game_info statistics: {e}")
     
     print(f"\n{'='*70}\n")
+
+def scrape_upcoming_game_info(days_ahead: int = 0) -> pd.DataFrame:
+    """
+    Scrape game_info for upcoming games within the next X days.
+
+    Uses CBBpy's get_games_range() to fetch game info for future dates.
+    Only returns scheduled/upcoming games (not already-completed games).
+
+    Parameters:
+        days_ahead: Number of days ahead to scrape (0 = today only,
+                    1 = today + tomorrow, etc.)
+
+    Returns:
+        DataFrame with GAME_INFO_COLUMNS (scores will be NaN for unplayed games).
+        Also saves to data/cbb_data_raw/upcoming_game_info.csv.
+    """
+    from datetime import timedelta
+
+    today = datetime.now()
+    end_date = today + timedelta(days=days_ahead)
+
+    start_str = today.strftime('%m/%d/%Y')
+    end_str = end_date.strftime('%m/%d/%Y')
+
+    print(f"Scraping upcoming game info from {start_str} to {end_str}...")
+
+    try:
+        # CBBpy get_games_range returns (game_info_df, boxscore_df, pbp_df)
+        # We only want game_info, so set box=False, pbp=False
+        game_info_df, _, _ = s.get_games_range(
+            start_date=start_str,
+            end_date=end_str,
+            info=True,
+            box=False,
+            pbp=False,
+        )
+    except Exception as e:
+        print(f"  Error fetching upcoming games: {e}")
+        return pd.DataFrame(columns=GAME_INFO_COLUMNS)
+
+    if game_info_df is None or game_info_df.empty:
+        print("  No upcoming games found")
+        return pd.DataFrame(columns=GAME_INFO_COLUMNS)
+
+    # Filter to only scheduled/upcoming games (not Final)
+    if 'game_status' in game_info_df.columns:
+        scheduled_mask = game_info_df['game_status'].str.lower() != 'final'
+        game_info_df = game_info_df[scheduled_mask].copy()
+
+    if game_info_df.empty:
+        print("  All games in date range are already completed")
+        return pd.DataFrame(columns=GAME_INFO_COLUMNS)
+
+    # Determine season year (CBB season year is the later year, e.g. 2025-26 season = 2026)
+    current_month = today.month
+    if current_month >= 11:
+        season_year = today.year + 1
+    else:
+        season_year = today.year
+
+    game_info_df['year'] = season_year
+
+    # Ensure column order
+    game_info_df = ensure_column_order(game_info_df, GAME_INFO_COLUMNS + ['year'])
+
+    print(f"  Found {len(game_info_df)} upcoming games")
+
+    # Save to file (use literal filename to avoid config module shadowing)
+    upcoming_output_path = os.path.join(OUTPUT_FOLDER, 'upcoming_game_info.csv')
+    game_info_df.to_csv(upcoming_output_path, index=False)
+    print(f"  Saved to {upcoming_output_path}")
+
+    return game_info_df
+
 
 if __name__ == "__main__":
     run_scraper()

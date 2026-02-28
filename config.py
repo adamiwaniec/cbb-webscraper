@@ -27,3 +27,8 @@ ALL_VALID_GAME_IDS_PATH = SCRAPING_DATA_PATH / 'all_valid_game_ids.csv'
 
 CBB_SPORTSBOOK_LINES_FILE = 'cbb_sportsbook_lines.csv'
 CBB_SPORTSBOOK_LINES_PATH = SCRAPING_DATA_PATH / CBB_SPORTSBOOK_LINES_FILE
+
+# Upcoming game data
+UPCOMING_GAME_INFO_FILE = 'upcoming_game_info.csv'
+UPCOMING_ODDS_FILE = 'upcoming_odds.csv'
+SPORTSBOOK_LINES_RAW_PATH = DATA_PATH / 'sportsbook_lines_raw'
