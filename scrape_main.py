@@ -5,7 +5,9 @@ Scrapes D1 men's basketball game data and boxscores from ESPN using the CBBpy li
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
+_this_dir = str(Path(__file__).parent)
+if _this_dir not in sys.path:
+    sys.path.insert(0, _this_dir)
 from config import *
 
 import os

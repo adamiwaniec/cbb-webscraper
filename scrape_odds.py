@@ -15,7 +15,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
+_this_dir = str(Path(__file__).parent)
+if _this_dir not in sys.path:
+    sys.path.insert(0, _this_dir)
 from config import *
 
 BETIQ_URL = 'https://betiq.teamrankings.com/college-basketball/betting-trends/custom-trend-tool/?min_season={}&max_season={}'
@@ -58,7 +60,7 @@ MAX_PAGES_TO_SCRAPE = None
 ROWS_PER_PAGE = 100
 
 #output file path
-OUTPUT_CSV_FILE = CBB_SPORTSBOOK_LINES_PATH
+OUTPUT_CSV_FILE = BETIQ_SPORTSBOOK_LINES_PATH
 
 #no browser window
 HEADLESS_MODE = True
@@ -429,110 +431,384 @@ def scrape_all_pages(base_url: str, output_file: str = None,
 
 
 # =============================================================================
-# ODDSHARVESTER UPCOMING ODDS SCRAPING
+# ODDSHARVESTER CONFIGURATION
 # =============================================================================
 
-def scrape_upcoming_odds(days_ahead: int = 0) -> pd.DataFrame:
+OH_SPORT = "basketball"
+OH_LEAGUE = "ncaa"
+OH_HISTORICAL_SEASONS = [
+    "2021-2022", "2022-2023", "2023-2024", "2024-2025", "2025-2026"
+]
+
+# Build market value strings for common spread and total lines
+# Spreads: -25.5 to +25.5 (half-point only, no zero)
+OH_SPREAD_MARKETS = []
+for i in range(-25, 0):
+    OH_SPREAD_MARKETS.append(f"asian_handicap_games_{i}_5_games")
+# +0.5 through +25.5
+for i in range(0, 26):
+    OH_SPREAD_MARKETS.append(f"asian_handicap_games_+{i}_5_games")
+
+# Totals: 120.5 to 180.5 (half-point only)
+OH_TOTAL_MARKETS = [f"over_under_games_{i}_5" for i in range(120, 181)]
+
+# All markets combined (moneyline + spreads + totals) — used for historical scraping
+OH_ALL_MARKETS = ["home_away"] + OH_SPREAD_MARKETS + OH_TOTAL_MARKETS
+
+# Upcoming-only markets: just moneyline for fast scraping.
+# OddsHarvester has difficulty navigating spread/total tabs on upcoming NCAAB match pages,
+# causing excessive timeouts. Moneyline is the primary market used for predictions.
+OH_UPCOMING_MARKETS = ["home_away"]
+
+
+# =============================================================================
+# ODDSHARVESTER SHARED HELPERS
+# =============================================================================
+
+def decimal_to_american(decimal_odds: float) -> int:
+    """Convert European decimal odds to American moneyline odds."""
+    if decimal_odds is None or decimal_odds <= 1.0:
+        return 0
+    if decimal_odds >= 2.0:
+        return int(round((decimal_odds - 1) * 100))
+    else:
+        return int(round(-100 / (decimal_odds - 1)))
+
+
+def american_to_decimal(american_odds: int) -> float:
+    """Convert American moneyline odds to European decimal odds."""
+    if american_odds >= 100:
+        return round(1.0 + american_odds / 100, 4)
+    elif american_odds <= -100:
+        return round(1.0 + 100 / abs(american_odds), 4)
+    return 0.0
+
+
+def _parse_odds_value(raw: str) -> tuple:
+    """
+    Parse an odds string that could be decimal ('1.63') or American ('-159', '+135').
+
+    Returns (decimal_odds, american_odds) tuple.
+    """
+    if not raw:
+        return (0.0, 0)
+    raw = raw.strip()
+    try:
+        val = float(raw)
+    except (ValueError, TypeError):
+        return (0.0, 0)
+
+    # Detect format: American odds are integers >= 100 or <= -100
+    # Decimal odds are always > 1.0 and typically < 100
+    if val >= 100 or val <= -100:
+        # American format
+        american = int(val)
+        decimal = american_to_decimal(american)
+        return (decimal, american)
+    elif val > 1.0:
+        # Decimal format
+        return (val, decimal_to_american(val))
+    else:
+        return (0.0, 0)
+
+
+def _parse_oh_matches(matches: list, markets_requested: list) -> list:
+    """
+    Parse OddsHarvester match results into flat rows.
+
+    Each match dict has keys like 'home_away_market', 'over_under_games_140_5_market',
+    'asian_handicap_games_-5_5_games_market', etc. Each market value is a list of
+    bookie dicts with odds labels as keys.
+
+    Returns list of dicts with standardized columns.
+    """
+    all_rows = []
+
+    # If matches is a DataFrame (from CSV), convert to list of dicts with parsed market columns
+    if isinstance(matches, pd.DataFrame):
+        records = matches.to_dict(orient='records')
+    else:
+        records = matches
+
+    for match in records:
+        home_team = match.get('home_team', '')
+        away_team = match.get('away_team', '')
+        match_date = match.get('match_date', '')
+        league_name = match.get('league_name', '')
+        home_score = match.get('home_score', None)
+        away_score = match.get('away_score', None)
+        match_link = match.get('match_link', '')
+
+        base_row = {
+            'match_date': match_date,
+            'home_team': home_team,
+            'away_team': away_team,
+            'league_name': league_name,
+            'home_score': home_score,
+            'away_score': away_score,
+            'match_link': match_link,
+        }
+
+        for market_val in markets_requested:
+            market_key = f"{market_val}_market"
+            market_data = match.get(market_key, None)
+
+            # If market_data is a string (from CSV), parse it as a list of dicts
+            if isinstance(market_data, str):
+                import ast
+                try:
+                    market_data = ast.literal_eval(market_data)
+                except Exception:
+                    continue
+
+            if not market_data or not isinstance(market_data, list):
+                continue
+
+            for bookie in market_data:
+                bookmaker = bookie.get('bookmaker_name', '')
+
+                if market_val == "home_away":
+                    # Moneyline: keys '1' (home) and '2' (away)
+                    # Odds may be decimal ('1.63') or American ('-159')
+                    home_dec, home_am = _parse_odds_value(str(bookie.get('1', '')))
+                    away_dec, away_am = _parse_odds_value(str(bookie.get('2', '')))
+                    if home_dec <= 1.0 or away_dec <= 1.0:
+                        continue
+                    all_rows.append({
+                        **base_row,
+                        'market_type': 'moneyline',
+                        'line_value': None,
+                        'home_odds_dec': home_dec,
+                        'away_odds_dec': away_dec,
+                        'home_odds_american': home_am,
+                        'away_odds_american': away_am,
+                        'over_odds_dec': None,
+                        'under_odds_dec': None,
+                        'bookmaker_name': bookmaker,
+                    })
+
+                elif market_val.startswith("over_under_games_"):
+                    # Total: keys 'odds_over' and 'odds_under'
+                    line_str = market_val.replace("over_under_games_", "").replace("_", ".")
+                    try:
+                        line_val = float(line_str)
+                    except (ValueError, TypeError):
+                        continue
+                    over_dec, _ = _parse_odds_value(str(bookie.get('odds_over', '')))
+                    under_dec, _ = _parse_odds_value(str(bookie.get('odds_under', '')))
+                    if over_dec <= 1.0 or under_dec <= 1.0:
+                        continue
+                    all_rows.append({
+                        **base_row,
+                        'market_type': 'total',
+                        'line_value': line_val,
+                        'home_odds_dec': None,
+                        'away_odds_dec': None,
+                        'home_odds_american': None,
+                        'away_odds_american': None,
+                        'over_odds_dec': over_dec,
+                        'under_odds_dec': under_dec,
+                        'bookmaker_name': bookmaker,
+                    })
+
+                elif market_val.startswith("asian_handicap_games_"):
+                    # Spread: keys 'handicap_team_1' and 'handicap_team_2'
+                    line_str = market_val.replace("asian_handicap_games_", "").replace("_games", "").replace("_", ".")
+                    try:
+                        line_val = float(line_str)
+                    except (ValueError, TypeError):
+                        continue
+                    home_dec, home_am = _parse_odds_value(str(bookie.get('handicap_team_1', '')))
+                    away_dec, away_am = _parse_odds_value(str(bookie.get('handicap_team_2', '')))
+                    if home_dec <= 1.0 or away_dec <= 1.0:
+                        continue
+                    all_rows.append({
+                        **base_row,
+                        'market_type': 'spread',
+                        'line_value': line_val,
+                        'home_odds_dec': home_dec,
+                        'away_odds_dec': away_dec,
+                        'home_odds_american': home_am,
+                        'away_odds_american': away_am,
+                        'over_odds_dec': None,
+                        'under_odds_dec': None,
+                        'bookmaker_name': bookmaker,
+                    })
+
+    return all_rows
+
+
+# =============================================================================
+# ODDSHARVESTER SCRAPING FUNCTIONS
+# =============================================================================
+
+def scrape_upcoming_odds(day: str = "today") -> pd.DataFrame:
     """
     Scrape upcoming NCAA basketball odds from OddsPortal via OddsHarvester.
 
     Parameters:
-        days_ahead: Number of days ahead to scrape (0 = today only,
-                    1 = today + tomorrow, etc.)
+        day: "today", "tomorrow", or "both"
 
     Returns:
-        DataFrame with columns: match_date, home_team, away_team,
-        home_ml, away_ml, bookmaker_name, league_name
-        Also saves to data/sportsbook_lines_raw/upcoming_odds.csv
+        DataFrame with odds for all markets (moneyline, spread, total).
+        Saves to data/sportsbook_lines_raw/oh_upcoming_odds.csv
+    """
+
+    from datetime import datetime as dt, timedelta
+
+    # Load the pre-scraped odds CSV
+    matches = pd.read_csv(OH_UPCOMING_ODDS_PATH)
+    if matches.empty:
+        print("  No upcoming odds found in CSV")
+        return pd.DataFrame()
+
+    # Determine target dates based on 'day' argument
+    today = dt.now()
+    if day == "today":
+        target_dates = [today.strftime('%Y-%m-%d')]
+    elif day == "tomorrow":
+        target_dates = [(today + timedelta(days=1)).strftime('%Y-%m-%d')]
+    elif day == "both":
+        target_dates = [today.strftime('%Y-%m-%d'), (today + timedelta(days=1)).strftime('%Y-%m-%d')]
+    else:
+        print(f"  [ERR] Invalid day parameter: {day}. Use 'today', 'tomorrow', or 'both'.")
+        return pd.DataFrame()
+
+    
+    # Filter matches by date part of match_date (ignore time)
+    if 'match_date' in matches.columns:
+        # Extract just the date part (YYYY-MM-DD) from match_date
+        match_dates = matches['match_date'].astype(str).str[:10]
+        matches = matches[match_dates.isin(target_dates)]
+    else:
+        print("  [ERR] match_date column not found in oh_upcoming_odds.csv")
+        return pd.DataFrame()
+
+    if matches.empty:
+        print(f"  No upcoming odds found for {', '.join(target_dates)} in CSV")
+        return pd.DataFrame()
+
+    # Parse odds for all available markets
+    all_rows = _parse_oh_matches(matches, OH_UPCOMING_MARKETS)
+    if not all_rows:
+        print("  No parseable odds data in filtered results")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_rows)
+    # Optionally save filtered/parsed odds for debugging
+    # os.makedirs(str(SPORTSBOOK_LINES_RAW_PATH), exist_ok=True)
+    # output_path = OH_UPCOMING_ODDS_PATH.replace('.csv', '_filtered.csv')
+    # df.to_csv(str(output_path), index=False)
+
+    _print_odds_summary(df)
+    return df
+
+
+def scrape_historical_odds(seasons: list = None) -> pd.DataFrame:
+    """
+    Scrape historical NCAA basketball odds from OddsPortal via OddsHarvester.
+
+    Parameters:
+        seasons: List of season strings, e.g. ["2023-2024", "2024-2025"].
+                 Defaults to OH_HISTORICAL_SEASONS.
+
+    Returns:
+        DataFrame with historical odds for all markets.
+        Saves to data/sportsbook_lines_raw/oh_historical_odds.csv
     """
     import asyncio
-    import json as json_module
-    from datetime import datetime as dt, timedelta
 
     try:
         from oddsharvester.core.scraper_app import run_scraper
         from oddsharvester.utils.command_enum import CommandEnum
     except ImportError:
-        print("  [ERR] OddsHarvester not installed. Cannot scrape upcoming odds.")
+        print("  [ERR] OddsHarvester not installed. Cannot scrape historical odds.")
         return pd.DataFrame()
 
-    today = dt.now()
-    all_rows = []
+    if seasons is None:
+        seasons = OH_HISTORICAL_SEASONS
 
-    for day_offset in range(days_ahead + 1):
-        target_date = today + timedelta(days=day_offset)
-        date_str = target_date.strftime('%Y%m%d')
-        print(f"  Scraping odds for {target_date.strftime('%Y-%m-%d')}...")
+    async def _scrape_all_seasons():
+        all_results = []
+        for season in seasons:
+            print(f"\n  Scraping historical odds for season {season}...")
+            try:
+                result = await run_scraper(
+                    command=CommandEnum.HISTORIC,
+                    sport=OH_SPORT,
+                    leagues=[OH_LEAGUE],
+                    season=season,
+                    markets=OH_ALL_MARKETS,
+                    headless=True,
+                )
+                if result is not None and result.success:
+                    print(f"    Found {len(result.success)} matches "
+                          f"({result.stats.successful} successful, "
+                          f"{result.stats.failed} failed)")
+                    # Tag each match with the season
+                    for m in result.success:
+                        m['_season'] = season
+                    all_results.extend(result.success)
+                else:
+                    print(f"    No odds found for season {season}")
+                    if result and result.failed:
+                        print(f"    {len(result.failed)} URLs failed")
+                if result and result.partial:
+                    print(f"    {len(result.partial)} partial results")
+            except Exception as e:
+                print(f"    Error scraping season {season}: {e}")
+        return all_results
 
-        try:
-            result = asyncio.run(run_scraper(
-                command=CommandEnum.UPCOMING_MATCHES,
-                sport="basketball",
-                date=date_str,
-                markets=["home_away"],
-                headless=True,
-                request_delay=1.0,
-            ))
-        except Exception as e:
-            print(f"    Error scraping odds for {date_str}: {e}")
-            continue
+    matches = asyncio.run(_scrape_all_seasons())
 
-        if result is None or not result.success:
-            print(f"    No odds found for {date_str}")
-            continue
+    if not matches:
+        print("  No historical odds found")
+        return pd.DataFrame()
 
-        print(f"    Found {len(result.success)} matches")
+    all_rows = _parse_oh_matches(matches, OH_ALL_MARKETS)
 
-        for match in result.success:
-            home_team = match.get('home_team', '')
-            away_team = match.get('away_team', '')
-            match_date = match.get('match_date', '')
-            league_name = match.get('league_name', '')
-
-            # Parse home_away_market
-            ha_market = match.get('home_away_market', [])
-            if isinstance(ha_market, str):
-                try:
-                    ha_market = json_module.loads(ha_market)
-                except (json_module.JSONDecodeError, TypeError):
-                    ha_market = []
-
-            if not ha_market:
-                continue
-
-            for bookie in ha_market:
-                try:
-                    home_ml = float(bookie.get('1', 0))
-                    away_ml = float(bookie.get('2', 0))
-                except (ValueError, TypeError):
-                    continue
-
-                if home_ml == 0 or away_ml == 0:
-                    continue
-
-                all_rows.append({
-                    'match_date': match_date,
-                    'home_team': home_team,
-                    'away_team': away_team,
-                    'home_ml': home_ml,
-                    'away_ml': away_ml,
-                    'bookmaker_name': bookie.get('bookmaker_name', ''),
-                    'league_name': league_name,
-                })
+    # Add season column from tagged matches
+    if all_rows:
+        # Re-parse to include season - match by match_link
+        link_to_season = {}
+        for m in matches:
+            link = m.get('match_link', '')
+            if link:
+                link_to_season[link] = m.get('_season', '')
+        for row in all_rows:
+            row['season'] = link_to_season.get(row.get('match_link', ''), '')
 
     if not all_rows:
-        print("  No upcoming odds found")
+        print("  No parseable odds data in historical results")
         return pd.DataFrame()
 
     df = pd.DataFrame(all_rows)
 
     # Save to file
-    output_path = SPORTSBOOK_LINES_RAW_PATH / 'upcoming_odds.csv'
     os.makedirs(str(SPORTSBOOK_LINES_RAW_PATH), exist_ok=True)
+    output_path = OH_HISTORICAL_ODDS_PATH
     df.to_csv(str(output_path), index=False)
-    print(f"  Saved {len(df)} odds rows to {output_path}")
+    print(f"\n  Saved {len(df)} historical odds rows to {output_path}")
+    _print_odds_summary(df)
 
     return df
+
+
+def _print_odds_summary(df: pd.DataFrame) -> None:
+    """Print a summary of scraped odds data."""
+    if df.empty:
+        return
+    print(f"\n  --- Odds Summary ---")
+    print(f"  Total rows: {len(df)}")
+    if 'market_type' in df.columns:
+        for mtype, count in df['market_type'].value_counts().items():
+            print(f"    {mtype}: {count} rows")
+    if 'bookmaker_name' in df.columns:
+        n_bookies = df['bookmaker_name'].nunique()
+        print(f"  Bookmakers: {n_bookies}")
+    unique_matches = df.groupby(['home_team', 'away_team', 'match_date']).ngroups
+    print(f"  Unique matches: {unique_matches}")
+    print(f"  -------------------")
 
 
 if __name__ == "__main__":
