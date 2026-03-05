@@ -942,7 +942,7 @@ if __name__ == "__main__":
     print("Betting Trends Scraper")
     print("=" * 60)
     print(f"Rows per page: {ROWS_PER_PAGE}")
-    print(f"Logging: {'ON' if LOGGING_ENABLED else 'OFF'}")
+    # print(f"Logging: {'ON' if LOGGING_ENABLED else 'OFF'}")
     if MAX_PAGES_TO_SCRAPE:
         print(f"Max pages: {MAX_PAGES_TO_SCRAPE}")
     print("=" * 60)
