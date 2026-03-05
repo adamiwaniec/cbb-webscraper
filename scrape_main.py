@@ -350,17 +350,106 @@ def log_error_id(game_id: str, year: int, error_type: str, is_error: bool):
 
 # ========= MAIN SCRAPING FUNCTIONS =========
 
-def get_all_game_ids_for_season(year: int) -> List[str]:
-    """Get all game IDs for a given season."""
+def get_final_game_ids_from_game_info() -> Set[str]:
+    """
+    Return game IDs from game_info.csv where game_status is 'Final'.
+    Used by scrape_completed_games to restrict GAME_STATS, BOXSCORES, and PBP
+    scraping to only completed games, avoiding pointless attempts on scheduled
+    or postponed games that would just error out.
+    Returns an empty set if game_info.csv does not exist.
+    """
+    if not os.path.isfile(GAME_INFO_OUTPUT_PATH):
+        return set()
+    try:
+        df = pd.read_csv(
+            GAME_INFO_OUTPUT_PATH,
+            usecols=['game_id', 'game_status'],
+            dtype={'game_id': str, 'game_status': str},
+        )
+        final_mask = df['game_status'].str.lower() == 'final'
+        return set(df.loc[final_mask, 'game_id'].unique())
+    except Exception as e:
+        print(f"  Warning: Could not read Final game IDs from game_info.csv: {e}")
+        return set()
+
+
+def get_stale_scheduled_game_ids() -> Set[str]:
+    """
+    Return game IDs in game_info.csv whose game_day has passed but whose
+    game_status is not 'Final'. These are games that were scraped while
+    scheduled (e.g. from a previous scrape_upcoming_game_info call or an
+    early GAME_INFO run) and now need to be re-scraped to get the final result.
+    """
+    if not os.path.isfile(GAME_INFO_OUTPUT_PATH):
+        return set()
+    try:
+        df = pd.read_csv(
+            GAME_INFO_OUTPUT_PATH,
+            usecols=['game_id', 'game_status', 'game_day'],
+            dtype={'game_id': str, 'game_status': str},
+        )
+        today = datetime.now().date()
+        stale_mask = (
+            df['game_status'].str.lower() != 'final'
+        ) & (
+            pd.to_datetime(df['game_day'], errors='coerce').dt.date < today
+        )
+        return set(df.loc[stale_mask, 'game_id'].unique())
+    except Exception as e:
+        print(f"  Warning: Could not identify stale scheduled games: {e}")
+        return set()
+
+
+def remove_game_ids_from_csv(csv_path: str, game_ids: Set[str]) -> int:
+    """
+    Remove all rows matching the given game_ids from a CSV file.
+    Writes atomically via a temp file to avoid corruption.
+    Returns the number of rows removed.
+    """
+    if not game_ids or not os.path.isfile(csv_path):
+        return 0
+    try:
+        df = pd.read_csv(csv_path, dtype={'game_id': str})
+        before = len(df)
+        df = df[~df['game_id'].isin(game_ids)]
+        removed = before - len(df)
+        if removed > 0:
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.csv', dir=os.path.dirname(csv_path))
+            try:
+                os.close(temp_fd)
+                df.to_csv(temp_path, index=False)
+                shutil.move(temp_path, csv_path)
+            except Exception as e:
+                if os.path.isfile(temp_path):
+                    os.remove(temp_path)
+                raise e
+        return removed
+    except Exception as e:
+        print(f"  Warning: Could not remove rows from {csv_path}: {e}")
+        return 0
+
+
+def get_all_game_ids_for_season(year: int, use_existing_ids: bool = None, skip_error_ids: bool = None, mode: str = None) -> List[str]:
+    """Get all game IDs for a given season.
+
+    Parameters:
+        year: Season year (ESPN format)
+        use_existing_ids: Override USE_EXISTING_GAME_IDS global (None = use global)
+        skip_error_ids: Override SKIP_EXISTING_ERROR_GAME_IDS global (None = use global)
+        mode: Override SCRAPE_MODE global for error-type filtering (None = use global)
+    """
+    _use_existing = USE_EXISTING_GAME_IDS if use_existing_ids is None else use_existing_ids
+    _skip_errors  = SKIP_EXISTING_ERROR_GAME_IDS if skip_error_ids is None else skip_error_ids
+    _mode         = SCRAPE_MODE if mode is None else mode
 
     print(f"    Fetching all game IDs for {year} season...")
-    
+
     if _shutdown_requested:
         return []
 
     game_id_list = []
 
-    if USE_EXISTING_GAME_IDS:
+    if _use_existing:
         all_ids_path = str(ALL_VALID_GAME_IDS_PATH)
         if os.path.isfile(all_ids_path):
             try:
@@ -374,7 +463,7 @@ def get_all_game_ids_for_season(year: int) -> List[str]:
     if not game_id_list:
         if _shutdown_requested:
             return []
-        
+
         # fetch game ids using API
         all_game_ids = s.get_game_ids_season(year)
 
@@ -402,7 +491,7 @@ def get_all_game_ids_for_season(year: int) -> List[str]:
             )
         game_id_list = list(all_game_ids)
 
-    if SKIP_EXISTING_ERROR_GAME_IDS:
+    if _skip_errors:
         error_ids_path = str(ERROR_IDS_PATH)
         if os.path.isfile(error_ids_path):
             try:
@@ -419,132 +508,161 @@ def get_all_game_ids_for_season(year: int) -> List[str]:
         else:
             error_ids_dict = {}
 
-        if SCRAPE_MODE == 'GAME_INFO':
+        if _mode == 'GAME_INFO':
             filtered_game_id_list = [
-                gid for gid in game_id_list 
+                gid for gid in game_id_list
                 if gid not in error_ids_dict or not error_ids_dict[gid].get('is_game_info_error', False)
             ]
-        elif SCRAPE_MODE == 'GAME_STATS':
+        elif _mode == 'GAME_STATS':
             filtered_game_id_list = [
-                gid for gid in game_id_list 
+                gid for gid in game_id_list
                 if gid not in error_ids_dict or not error_ids_dict[gid].get('is_game_stats_error', False)
             ]
-        elif SCRAPE_MODE == 'BOXSCORES':
+        elif _mode == 'BOXSCORES':
             filtered_game_id_list = [
-                gid for gid in game_id_list 
+                gid for gid in game_id_list
                 if gid not in error_ids_dict or not error_ids_dict[gid].get('is_boxscore_error', False)
             ]
-        elif SCRAPE_MODE == 'PBP':
+        elif _mode == 'PBP':
             filtered_game_id_list = [
-                gid for gid in game_id_list 
+                gid for gid in game_id_list
                 if gid not in error_ids_dict or not error_ids_dict[gid].get('is_pbp_error', False)
             ]
         else:
             filtered_game_id_list = []
-            
+
         if len(filtered_game_id_list) < len(game_id_list):
             print(f"    Skipping {len(game_id_list) - len(filtered_game_id_list)} error game IDs")
         game_id_list = filtered_game_id_list
-    
+
     return game_id_list
 
-def scrape_season_data(year: int, existing_ids: Set[str]) -> int:
+def scrape_season_data(year: int, existing_ids: Set[str], mode: str = None, use_existing_ids: bool = None, skip_error_ids: bool = None, game_ids: List[str] = None) -> int:
     """
-    Scrape data for all games in a season based on SCRAPE_MODE.
-    
+    Scrape data for all games in a season.
+
+    Parameters:
+        year: Season year (ESPN format)
+        existing_ids: Set of already-scraped game IDs for this mode (modified in place on success)
+        mode: Scrape mode override — 'GAME_INFO', 'GAME_STATS', 'BOXSCORES', 'PBP'
+              (None = use SCRAPE_MODE global)
+        use_existing_ids: Override for USE_EXISTING_GAME_IDS (None = use global).
+                          Ignored when game_ids is provided.
+        skip_error_ids: Override for SKIP_EXISTING_ERROR_GAME_IDS (None = use global).
+                        Ignored when game_ids is provided.
+        game_ids: Pre-fetched list of game IDs to scrape. When provided, the internal
+                  get_all_game_ids_for_season() call is skipped entirely.
+
     Returns # of games scraped.
     """
-    
+    _mode = SCRAPE_MODE if mode is None else mode
+
+    # determine output path based on mode
+    if _mode == 'GAME_INFO':
+        output_path = GAME_INFO_OUTPUT_PATH
+    elif _mode == 'GAME_STATS':
+        output_path = GAME_STATS_OUTPUT_PATH
+    elif _mode == 'BOXSCORES':
+        output_path = BOXSCORE_OUTPUT_PATH
+    elif _mode == 'PBP':
+        output_path = PBP_OUTPUT_PATH
+    else:
+        print(f"Invalid scrape mode: {_mode}")
+        return 0
+
     print(f"\n{'='*70}")
-    print(f"Scraping {SCRAPE_MODE} for {year} season ({year-1}-{str(year)[-2:]})")
+    print(f"Scraping {_mode} for {year} season ({year-1}-{str(year)[-2:]})")
     print(f"{'='*70}")
-    
-    game_ids = get_all_game_ids_for_season(year)
-    
+
+    if game_ids is not None:
+        # Use the caller-supplied list directly (IDs already fetched and cached)
+        season_game_ids = game_ids
+    else:
+        season_game_ids = get_all_game_ids_for_season(year, use_existing_ids=use_existing_ids, skip_error_ids=skip_error_ids, mode=_mode)
+
     if _shutdown_requested:
         return 0
-    
+
     # filter out already scraped games
-    new_game_ids = [gid for gid in game_ids if gid not in existing_ids]
-    
-    if len(new_game_ids) < len(game_ids):
-        print(f"    Skipping {len(game_ids) - len(new_game_ids)} already scraped games")
-    
+    new_game_ids = [gid for gid in season_game_ids if gid not in existing_ids]
+
+    if len(new_game_ids) < len(season_game_ids):
+        print(f"    Skipping {len(season_game_ids) - len(new_game_ids)} already scraped games")
+
     if not new_game_ids:
         print(f"All games already scraped for {year}")
         return 0
-    
+
     print(f"    Scraping {len(new_game_ids)} new games...")
-    
+
     games_scraped = 0
     error_ids_count = 0
-    
+
     for idx, game_id in enumerate(new_game_ids, 1):
 
         #check if shutdown was initiated first
         if _shutdown_requested:
             return 0
-        
+
         data = None
         has_error = False
-        
+
         # fetch data for game_id:
         # uses wrapper in case of API error or empty data returned,
-
-        # confirms data has correct col format before appending to csv, 
+        # confirms data has correct col format before appending to csv,
         # else logs id to error file
-        if SCRAPE_MODE == 'GAME_INFO':
+        if _mode == 'GAME_INFO':
             data, has_error = get_game_info_safe(game_id)
             time.sleep(API_DELAY)
             if not data.empty and not has_error:
                 data['year'] = year
                 data = ensure_column_order(data, GAME_INFO_COLUMNS)
-                append_to_csv(data, GAME_INFO_OUTPUT_PATH)
+                append_to_csv(data, output_path)
             else:
                 log_error_id(game_id, year, 'game_info', True)
                 error_ids_count += 1
-        
-        elif SCRAPE_MODE == 'GAME_STATS':
+
+        elif _mode == 'GAME_STATS':
             data, has_error = get_game_stats_safe(game_id)
             time.sleep(API_DELAY)
             if not data.empty and not has_error:
                 data['year'] = year
                 data = ensure_column_order(data, GAME_STATS_COLUMNS)
-                append_to_csv(data, GAME_STATS_OUTPUT_PATH)
+                append_to_csv(data, output_path)
             else:
                 log_error_id(game_id, year, 'game_stats', True)
                 error_ids_count += 1
-        
-        elif SCRAPE_MODE == 'BOXSCORES':
+
+        elif _mode == 'BOXSCORES':
             data, has_error = get_game_boxscores_safe(game_id)
             time.sleep(API_DELAY)
             if not data.empty and not has_error:
                 data['game_id'] = game_id
                 data = ensure_column_order(data, BOXSCORE_COLUMNS)
-                append_to_csv(data, BOXSCORE_OUTPUT_PATH)
+                append_to_csv(data, output_path)
             else:
                 log_error_id(game_id, year, 'boxscore', True)
                 error_ids_count += 1
-        
-        elif SCRAPE_MODE == 'PBP':
+
+        elif _mode == 'PBP':
             data, has_error = get_game_pbp_safe(game_id)
             time.sleep(API_DELAY)
             if not data.empty and not has_error:
                 data['game_id'] = game_id
                 data = ensure_column_order(data, PBP_COLUMNS)
-                append_to_csv(data, PBP_OUTPUT_PATH)
+                append_to_csv(data, output_path)
             else:
                 log_error_id(game_id, year, 'pbp', True)
                 error_ids_count += 1
-        
+
         #mark game as successfully scraped
         if not has_error and data is not None and not data.empty:
             existing_ids.add(game_id)
             games_scraped += 1
-        
+
         if idx % 10 == 0:
             print(f"    Progress: {idx}/{len(new_game_ids)} games ({idx/len(new_game_ids)*100:.1f}%) - {games_scraped} saved, {error_ids_count} errors")
-    
+
     if games_scraped > 0:
         print(f"    Successfully scraped and saved {games_scraped} games")
     else:
@@ -552,11 +670,131 @@ def scrape_season_data(year: int, existing_ids: Set[str]) -> int:
 
     if error_ids_count > 0:
         print(f"    Logged {error_ids_count} error game IDs")
-    
+
     # consolidate error log into CSV
     consolidate_error_log()
-    
+
     return games_scraped
+
+
+def scrape_completed_games(years: list, modes: list) -> dict:
+    """
+    Scrape new completed games for the given season years and scrape modes.
+    Designed to be called from an external orchestrator (e.g. update_data.py).
+
+    Key behaviors:
+    - Fetches game IDs from ESPN once per season year (not once per mode) so
+      that all_valid_game_ids.csv is updated a single time and then reused
+      across all modes, avoiding redundant API calls.
+    - Always re-fetches game IDs from ESPN (ignores cached ID list) to catch
+      newly scheduled or rescheduled games.
+    - Never skips error-logged game IDs so that games that previously returned
+      null (e.g. not-yet-played games) are retried once they have completed.
+    - Deduplication against the existing output CSV prevents re-scraping games
+      that are already collected.
+    - For GAME_INFO: detects and re-scrapes rows where game_status is not
+      'Final' but the game_day has now passed (games scraped while scheduled
+      that have since been played).
+
+    Parameters:
+        years:  List of season years in ESPN format (e.g. [2026])
+        modes:  List of scrape modes, e.g. ['GAME_INFO', 'GAME_STATS', 'BOXSCORES', 'PBP']
+
+    Returns:
+        dict mapping each mode to {'scraped': int} with total games newly scraped.
+    """
+    mode_output_paths = {
+        'GAME_INFO':  GAME_INFO_OUTPUT_PATH,
+        'GAME_STATS': GAME_STATS_OUTPUT_PATH,
+        'BOXSCORES':  BOXSCORE_OUTPUT_PATH,
+        'PBP':        PBP_OUTPUT_PATH,
+    }
+
+    valid_modes = [m for m in modes if m in mode_output_paths]
+    if len(valid_modes) < len(modes):
+        for m in modes:
+            if m not in mode_output_paths:
+                print(f"  Skipping unknown scrape mode: {m}")
+
+    ensure_output_folder()
+    restore_error_game_ids_from_backup()
+
+    # --- Fetch game IDs once per season year, shared across all modes ---
+    print("\n" + "=" * 70)
+    print("Fetching season game IDs from ESPN...")
+    print("=" * 70)
+    season_game_ids = {}
+    for year in years:
+        if _shutdown_requested:
+            return {}
+        ids = get_all_game_ids_for_season(year, use_existing_ids=False, skip_error_ids=False)
+        season_game_ids[year] = ids
+        print(f"  Year {year}: {len(ids)} game IDs")
+
+    # For non-GAME_INFO modes, restrict to game IDs confirmed Final in game_info.csv.
+    # This avoids scraping stats/boxscores/PBP for scheduled or postponed games.
+    final_game_ids = get_final_game_ids_from_game_info()
+    if final_game_ids:
+        print(f"  {len(final_game_ids)} Final game IDs found in game_info.csv "
+              f"(used to filter GAME_STATS / BOXSCORES / PBP)")
+    else:
+        print("  Warning: no Final game IDs found in game_info.csv — "
+              "GAME_STATS / BOXSCORES / PBP will be skipped unless GAME_INFO runs first")
+
+    results = {}
+
+    for mode in valid_modes:
+        if _shutdown_requested:
+            break
+
+        output_path = mode_output_paths[mode]
+
+        # Load existing IDs for this mode's output file
+        existing_ids = get_existing_game_ids(output_path)
+        if existing_ids:
+            print(f"\n[{mode}] {len(existing_ids)} already-scraped game IDs in output file")
+
+        # --- GAME_INFO: detect stale scheduled rows and re-scrape them ---
+        if mode == 'GAME_INFO':
+            stale_ids = get_stale_scheduled_game_ids()
+            stale_to_retry = stale_ids & existing_ids
+            if stale_to_retry:
+                removed = remove_game_ids_from_csv(output_path, stale_to_retry)
+                existing_ids -= stale_to_retry
+                print(
+                    f"[GAME_INFO] {len(stale_to_retry)} stale scheduled game(s) found "
+                    f"(game_day passed, not Final) — removed {removed} row(s) to re-scrape"
+                )
+
+        total_scraped = 0
+
+        for year in years:
+            if _shutdown_requested:
+                break
+
+            if mode == 'GAME_INFO':
+                # Use the full season ID list — GAME_INFO can scrape scheduled games too
+                mode_game_ids = season_game_ids[year]
+            else:
+                # Restrict to IDs that are confirmed Final in game_info.csv
+                mode_game_ids = [gid for gid in season_game_ids[year] if gid in final_game_ids]
+                filtered_out = len(season_game_ids[year]) - len(mode_game_ids)
+                if filtered_out:
+                    print(f"    [{mode}] Skipping {filtered_out} non-Final game ID(s) "
+                          f"for {year} season (not yet completed per game_info.csv)")
+
+            scraped = scrape_season_data(
+                year,
+                existing_ids,
+                mode=mode,
+                skip_error_ids=False,       # retry previously-errored games
+                game_ids=mode_game_ids,
+            )
+            total_scraped += scraped
+
+        results[mode] = {'scraped': total_scraped}
+
+    return results
 
 
 # ========= Main scraping function =========
