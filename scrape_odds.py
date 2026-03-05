@@ -40,8 +40,36 @@ driver = None
 # CONFIGURATION MACROS - Tune these to customize scraping behavior
 # ============================================================================
 
+
 # Enable detailed logging: True (verbose logging), False (print statements only)
-LOGGING_ENABLED = True
+LOGGING_ENABLED = False
+
+# Suppress all OddsHarvester stdout/stderr output (True = silence, False = allow prints)
+ODDSHARVESTER_SUPPRESS_OUTPUT = True
+# =============================================================================
+# ODDSHARVESTER SHARED HELPERS
+# =============================================================================
+
+# Context manager to suppress stdout/stderr (for noisy OddsHarvester prints)
+import contextlib
+
+@contextlib.contextmanager
+def _suppress_output(enabled=True):
+    if not enabled:
+        yield
+        return
+    import sys
+    import os
+    with open(os.devnull, 'w') as devnull:
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        sys.stdout = devnull
+        sys.stderr = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
 # Seasons to scrape (format: "YYYY-YYYY")
 MIN_SEASON = "2024-2025"  # Start season
@@ -440,30 +468,138 @@ OH_HISTORICAL_SEASONS = [
     "2021-2022", "2022-2023", "2023-2024", "2024-2025", "2025-2026"
 ]
 
-# Build market value strings for common spread and total lines
-# Spreads: -25.5 to +25.5 (half-point only, no zero)
-OH_SPREAD_MARKETS = []
-for i in range(-25, 0):
-    OH_SPREAD_MARKETS.append(f"asian_handicap_games_{i}_5_games")
-# +0.5 through +25.5
-for i in range(0, 26):
-    OH_SPREAD_MARKETS.append(f"asian_handicap_games_+{i}_5_games")
+# ---------------------------------------------------------------------------
+# Spread line ranges — integer X generates an X.5 line
+# ---------------------------------------------------------------------------
+# Upcoming: moderate range (±10.5 pts) covers most non-blowout matchups
+OH_UPCOMING_SPREAD_MIN = -8
+OH_UPCOMING_SPREAD_MAX = 0
+# Historical: full range for thorough training data
+OH_HISTORICAL_SPREAD_MIN = -5
+OH_HISTORICAL_SPREAD_MAX = 5
 
-# Totals: 120.5 to 180.5 (half-point only)
-OH_TOTAL_MARKETS = [f"over_under_games_{i}_5" for i in range(120, 181)]
+# ---------------------------------------------------------------------------
+# Total (O/U) line ranges — integer X generates an X.5 line
+# ---------------------------------------------------------------------------
+# Upcoming: moderate range; typical NCAAB combined scores fall ~135–165
+OH_UPCOMING_TOTAL_MIN = 135
+OH_UPCOMING_TOTAL_MAX = 150
+# Historical: wider range for training data coverage
+OH_HISTORICAL_TOTAL_MIN = 140
+OH_HISTORICAL_TOTAL_MAX = 150
 
-# All markets combined (moneyline + spreads + totals) — used for historical scraping
-OH_ALL_MARKETS = ["home_away"] + OH_SPREAD_MARKETS + OH_TOTAL_MARKETS
+# ---------------------------------------------------------------------------
+# Derived market lists — built from the range macros above
+# ---------------------------------------------------------------------------
+OH_UPCOMING_SPREAD_MARKETS = (
+    [f"asian_handicap_games_{i}_5_games" for i in range(OH_UPCOMING_SPREAD_MIN, 0)]
+    + [f"asian_handicap_games_+{i}_5_games"
+       for i in range(max(0, OH_UPCOMING_SPREAD_MIN), OH_UPCOMING_SPREAD_MAX + 1)]
+)
+OH_UPCOMING_TOTAL_MARKETS = [
+    f"over_under_games_{i}_5" for i in range(OH_UPCOMING_TOTAL_MIN, OH_UPCOMING_TOTAL_MAX + 1)
+]
+# NOTE: OddsHarvester cannot navigate spread/total sub-tabs on OddsPortal upcoming match
+# pages — the sub-market selectors (e.g. "Asian Handicap -10.5") only exist on completed
+# historical match pages. Requesting spread/total for upcoming causes OddsHarvester to retry
+# every line for every match (hours of timeouts) and returns no usable data.
+# OH_UPCOMING_SPREAD_MARKETS and OH_UPCOMING_TOTAL_MARKETS are defined above for reference
+# and will be useful if OddsHarvester adds upcoming spread/total support in the future.
+OH_UPCOMING_MARKETS = ["home_away"] + OH_UPCOMING_SPREAD_MARKETS + OH_UPCOMING_TOTAL_MARKETS
 
-# Upcoming-only markets: just moneyline for fast scraping.
-# OddsHarvester has difficulty navigating spread/total tabs on upcoming NCAAB match pages,
-# causing excessive timeouts. Moneyline is the primary market used for predictions.
-OH_UPCOMING_MARKETS = ["home_away"]
+OH_HISTORICAL_SPREAD_MARKETS = (
+    [f"asian_handicap_games_{i}_5_games" for i in range(OH_HISTORICAL_SPREAD_MIN, 0)]
+    + [f"asian_handicap_games_+{i}_5_games"
+       for i in range(max(0, OH_HISTORICAL_SPREAD_MIN), OH_HISTORICAL_SPREAD_MAX + 1)]
+)
+OH_HISTORICAL_TOTAL_MARKETS = [
+    f"over_under_games_{i}_5" for i in range(OH_HISTORICAL_TOTAL_MIN, OH_HISTORICAL_TOTAL_MAX + 1)
+]
+OH_ALL_MARKETS = ["home_away"] + OH_HISTORICAL_SPREAD_MARKETS + OH_HISTORICAL_TOTAL_MARKETS
+
+# ---------------------------------------------------------------------------
+# OddsHarvester venv paths — used by _setup_oddsharvester_path()
+# ---------------------------------------------------------------------------
+_OH_VENV_PATH = Path(__file__).parent.parent / 'OddsHarvester' / '.venv'
+_OH_SRC_PATH = Path(__file__).parent.parent / 'OddsHarvester' / 'src'
 
 
 # =============================================================================
 # ODDSHARVESTER SHARED HELPERS
 # =============================================================================
+
+def _setup_oddsharvester_path() -> None:
+    """Add OddsHarvester venv site-packages and source tree to sys.path."""
+    venv_site = _OH_VENV_PATH / 'Lib' / 'site-packages'
+    for p in [str(_OH_SRC_PATH), str(venv_site)]:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+
+def _run_oh_scrape(
+    command: str,
+    season: str = None,
+    date: str = None,
+    markets: list = None,
+    scrape_odds_history: bool = False,
+) -> list:
+    """
+    Shared synchronous wrapper around OddsHarvester's run_scraper().
+
+    Adds the OddsHarvester venv to sys.path, runs the async scraper, and returns
+    the list of raw match dicts from result.success (empty list on failure).
+
+    Parameters:
+        command:            "scrape_upcoming" or "scrape_historic"
+        season:             Season string for historic, e.g. "2024-2025"
+        date:               Date string YYYYMMDD for upcoming
+        markets:            List of OH market identifier strings
+        scrape_odds_history: Include odds movement history (historic only)
+    """
+    import asyncio
+
+    _setup_oddsharvester_path()
+    # # Suppress noisy OddsHarvester warnings if output suppression is enabled
+    # if ODDSHARVESTER_SUPPRESS_OUTPUT:
+    #     os.environ["OH_SUPPRESS_BOOKIES_FILTER_WARN"] = "1"
+    #     os.environ["OH_SUPPRESS_INCOMPLETE_ODDS_WARN"] = "1"
+    # else:
+    #     os.environ.pop("OH_SUPPRESS_BOOKIES_FILTER_WARN", None)
+    #     os.environ.pop("OH_SUPPRESS_INCOMPLETE_ODDS_WARN", None)
+    try:
+        from oddsharvester.core.scraper_app import run_scraper
+    except ImportError as e:
+        print(f"  [ERR] OddsHarvester not importable: {e}")
+        print(f"        Ensure OddsHarvester/.venv/ exists with all dependencies installed.")
+        return []
+
+    # for _oh_logger in ("oddsharvester", "ScraperApp", "StorageManager"):
+    #     logging.getLogger(_oh_logger).setLevel(logging.CRITICAL)
+
+    import asyncio
+
+    async def _scrape():
+        result = await run_scraper(
+            command=command,
+            sport=OH_SPORT,
+            leagues=[OH_LEAGUE],
+            season=season,
+            date=date,
+            markets=markets,
+            headless=True,
+            scrape_odds_history=scrape_odds_history,
+        )
+        if result and result.success:
+            return result.success
+        # if result and result.failed:
+            # Only print failed URLs if not suppressing output
+            # if not ODDSHARVESTER_SUPPRESS_OUTPUT:
+            #     print(f"    {len(result.failed)} URLs failed")
+        return []
+
+    with _suppress_output(ODDSHARVESTER_SUPPRESS_OUTPUT):
+        return asyncio.run(_scrape())
+
 
 def decimal_to_american(decimal_odds: float) -> int:
     """Convert European decimal odds to American moneyline odds."""
@@ -651,18 +787,10 @@ def scrape_upcoming_odds(day: str = "today") -> pd.DataFrame:
 
     Returns:
         DataFrame with odds for all markets (moneyline, spread, total).
-        Saves to data/sportsbook_lines_raw/oh_upcoming_odds.csv
+        Saves raw scraped data to data/sportsbook_lines_raw/oh_upcoming_odds.csv
     """
-
     from datetime import datetime as dt, timedelta
 
-    # Load the pre-scraped odds CSV
-    matches = pd.read_csv(OH_UPCOMING_ODDS_PATH)
-    if matches.empty:
-        print("  No upcoming odds found in CSV")
-        return pd.DataFrame()
-
-    # Determine target dates based on 'day' argument
     today = dt.now()
     if day == "today":
         target_dates = [today.strftime('%Y-%m-%d')]
@@ -674,32 +802,46 @@ def scrape_upcoming_odds(day: str = "today") -> pd.DataFrame:
         print(f"  [ERR] Invalid day parameter: {day}. Use 'today', 'tomorrow', or 'both'.")
         return pd.DataFrame()
 
-    
-    # Filter matches by date part of match_date (ignore time)
-    if 'match_date' in matches.columns:
-        # Extract just the date part (YYYY-MM-DD) from match_date
-        match_dates = matches['match_date'].astype(str).str[:10]
-        matches = matches[match_dates.isin(target_dates)]
+    # Scrape each target date via OddsHarvester API
+    all_matches = []
+    for date_str in target_dates:
+        oh_date = date_str.replace('-', '')  # YYYYMMDD format expected by OddsHarvester
+        print(f"  Scraping upcoming odds for {date_str}...")
+        matches = _run_oh_scrape(
+            command="scrape_upcoming",
+            date=oh_date,
+            markets=OH_UPCOMING_MARKETS,
+        )
+        print(f"    Found {len(matches)} matches")
+        all_matches.extend(matches)
+
+    if not all_matches:
+        print(f"  No upcoming odds found for {', '.join(target_dates)}")
+        return pd.DataFrame()
+
+    # Save raw scraped data to CSV, replacing any existing file
+    os.makedirs(str(SPORTSBOOK_LINES_RAW_PATH), exist_ok=True)
+    raw_df = pd.DataFrame(all_matches)
+    raw_df.to_csv(str(OH_UPCOMING_ODDS_PATH), index=False)
+
+    # Filter to target dates (safety check — API should already be date-scoped)
+    if 'match_date' in raw_df.columns:
+        match_dates = raw_df['match_date'].astype(str).str[:10]
+        raw_df = raw_df[match_dates.isin(target_dates)]
     else:
-        print("  [ERR] match_date column not found in oh_upcoming_odds.csv")
+        print("  [ERR] match_date column not found in scraped data")
         return pd.DataFrame()
 
-    if matches.empty:
-        print(f"  No upcoming odds found for {', '.join(target_dates)} in CSV")
+    if raw_df.empty:
+        print(f"  No upcoming odds found for {', '.join(target_dates)} after filtering")
         return pd.DataFrame()
 
-    # Parse odds for all available markets
-    all_rows = _parse_oh_matches(matches, OH_UPCOMING_MARKETS)
+    all_rows = _parse_oh_matches(raw_df, OH_UPCOMING_MARKETS)
     if not all_rows:
-        print("  No parseable odds data in filtered results")
+        print("  No parseable odds data in scraped results")
         return pd.DataFrame()
 
     df = pd.DataFrame(all_rows)
-    # Optionally save filtered/parsed odds for debugging
-    # os.makedirs(str(SPORTSBOOK_LINES_RAW_PATH), exist_ok=True)
-    # output_path = OH_UPCOMING_ODDS_PATH.replace('.csv', '_filtered.csv')
-    # df.to_csv(str(output_path), index=False)
-
     _print_odds_summary(df)
     return df
 
@@ -716,50 +858,27 @@ def scrape_historical_odds(seasons: list = None) -> pd.DataFrame:
         DataFrame with historical odds for all markets.
         Saves to data/sportsbook_lines_raw/oh_historical_odds.csv
     """
-    import asyncio
-
-    try:
-        from oddsharvester.core.scraper_app import run_scraper
-        from oddsharvester.utils.command_enum import CommandEnum
-    except ImportError:
-        print("  [ERR] OddsHarvester not installed. Cannot scrape historical odds.")
-        return pd.DataFrame()
-
     if seasons is None:
         seasons = OH_HISTORICAL_SEASONS
 
-    async def _scrape_all_seasons():
-        all_results = []
-        for season in seasons:
-            print(f"\n  Scraping historical odds for season {season}...")
-            try:
-                result = await run_scraper(
-                    command=CommandEnum.HISTORIC,
-                    sport=OH_SPORT,
-                    leagues=[OH_LEAGUE],
-                    season=season,
-                    markets=OH_ALL_MARKETS,
-                    headless=True,
-                )
-                if result is not None and result.success:
-                    print(f"    Found {len(result.success)} matches "
-                          f"({result.stats.successful} successful, "
-                          f"{result.stats.failed} failed)")
-                    # Tag each match with the season
-                    for m in result.success:
-                        m['_season'] = season
-                    all_results.extend(result.success)
-                else:
-                    print(f"    No odds found for season {season}")
-                    if result and result.failed:
-                        print(f"    {len(result.failed)} URLs failed")
-                if result and result.partial:
-                    print(f"    {len(result.partial)} partial results")
-            except Exception as e:
-                print(f"    Error scraping season {season}: {e}")
-        return all_results
+    all_results = []
+    for season in seasons:
+        print(f"\n  Scraping historical odds for season {season}...")
+        matches = _run_oh_scrape(
+            command="scrape_historic",
+            season=season,
+            markets=OH_ALL_MARKETS,
+            scrape_odds_history=True,
+        )
+        if matches:
+            print(f"    Found {len(matches)} matches")
+            for m in matches:
+                m['_season'] = season
+            all_results.extend(matches)
+        else:
+            print(f"    No odds found for season {season}")
 
-    matches = asyncio.run(_scrape_all_seasons())
+    matches = all_results
 
     if not matches:
         print("  No historical odds found")
