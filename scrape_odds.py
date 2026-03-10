@@ -472,7 +472,7 @@ OH_HISTORICAL_SEASONS = [
 # Spread line ranges — integer X generates an X.5 line
 # ---------------------------------------------------------------------------
 # Upcoming: moderate range (±10.5 pts) covers most non-blowout matchups
-OH_UPCOMING_SPREAD_MIN = -8
+OH_UPCOMING_SPREAD_MIN = -9
 OH_UPCOMING_SPREAD_MAX = 0
 # Historical: full range for thorough training data
 OH_HISTORICAL_SPREAD_MIN = -5
@@ -482,7 +482,7 @@ OH_HISTORICAL_SPREAD_MAX = 5
 # Total (O/U) line ranges — integer X generates an X.5 line
 # ---------------------------------------------------------------------------
 # Upcoming: moderate range; typical NCAAB combined scores fall ~135–165
-OH_UPCOMING_TOTAL_MIN = 135
+OH_UPCOMING_TOTAL_MIN = 140
 OH_UPCOMING_TOTAL_MAX = 150
 # Historical: wider range for training data coverage
 OH_HISTORICAL_TOTAL_MIN = 140
@@ -499,13 +499,7 @@ OH_UPCOMING_SPREAD_MARKETS = (
 OH_UPCOMING_TOTAL_MARKETS = [
     f"over_under_games_{i}_5" for i in range(OH_UPCOMING_TOTAL_MIN, OH_UPCOMING_TOTAL_MAX + 1)
 ]
-# NOTE: OddsHarvester cannot navigate spread/total sub-tabs on OddsPortal upcoming match
-# pages — the sub-market selectors (e.g. "Asian Handicap -10.5") only exist on completed
-# historical match pages. Requesting spread/total for upcoming causes OddsHarvester to retry
-# every line for every match (hours of timeouts) and returns no usable data.
-# OH_UPCOMING_SPREAD_MARKETS and OH_UPCOMING_TOTAL_MARKETS are defined above for reference
-# and will be useful if OddsHarvester adds upcoming spread/total support in the future.
-OH_UPCOMING_MARKETS = ["home_away"] + OH_UPCOMING_SPREAD_MARKETS + OH_UPCOMING_TOTAL_MARKETS
+OH_UPCOMING_MARKETS = ["home_away"] + OH_UPCOMING_SPREAD_MARKETS + OH_UPCOMING_TOTAL_MARKETS 
 
 OH_HISTORICAL_SPREAD_MARKETS = (
     [f"asian_handicap_games_{i}_5_games" for i in range(OH_HISTORICAL_SPREAD_MIN, 0)]

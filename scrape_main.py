@@ -29,7 +29,7 @@ import signal
 # ========= CONFIGURATION MACROS =========
 
 # Data collection mode: 'GAME_INFO', 'GAME_STATS', 'BOXSCORES', or 'PBP'
-SCRAPE_MODE = 'BOXSCORES'
+SCRAPE_MODE = 'GAME_INFO'
 
 # Season configuration (ESPN data only availabe from 2003)
 START_YEAR = 2026
@@ -45,7 +45,7 @@ cbbpy_utils.ATTEMPTS = 2
 USE_EXISTING_GAME_IDS = True
 
 # Skip error game IDs already logged in error_game_ids.csv
-SKIP_EXISTING_ERROR_GAME_IDS = False
+SKIP_EXISTING_ERROR_GAME_IDS = True
 
 
 # ========= EARLY STOPPAGE HANDLING =========
@@ -83,7 +83,7 @@ GAME_INFO_COLUMNS = [
     'home_score', 'away_team', 'away_id', 'away_rank', 'away_record', 'away_score',
     'home_point_spread', 'home_win', 'num_ots', 'is_neutral', 'is_postseason',
     'tournament', 'game_day', 'game_time', 'game_loc', 'arena', 'arena_capacity',
-    'attendance', 'tv_network', 'referee_1', 'referee_2', 'referee_3',
+    'attendance', 'tv_network', 'referee_1', 'referee_2', 'referee_3', 'year'
 ]
 
 GAME_STATS_COLUMNS = [
